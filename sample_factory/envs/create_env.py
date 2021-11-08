@@ -1,7 +1,7 @@
 from sample_factory.envs.env_registry import global_env_registry
 
 
-def create_env(full_env_name, cfg=None, env_config=None):
+def create_env(full_env_name, env_id, cfg=None, env_config=None):
     """
     Factory function that creates environment instances.
     Matches full_env_name with env family prefixes registered in the REGISTRY and calls make_env_func()
@@ -19,5 +19,5 @@ def create_env(full_env_name, cfg=None, env_config=None):
 
     env_registry = global_env_registry()
     env_registry_entry = env_registry.resolve_env_name(full_env_name)
-    env = env_registry_entry.make_env_func(full_env_name, cfg=cfg, env_config=env_config)
+    env = env_registry_entry.make_env_func(full_env_name, env_id, cfg=cfg, env_config=env_config)
     return env

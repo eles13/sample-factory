@@ -355,7 +355,7 @@ class VectorEnvRunner:
             )
 
             # log.info('Creating env %r... %d-%d-%d', env_config, self.worker_idx, self.split_idx, env_i)
-            env = make_env_func(self.cfg, env_config=env_config)
+            env = make_env_func(self.cfg, env_id, env_config=env_config)
 
             env.seed(env_id)
             self.envs.append(env)

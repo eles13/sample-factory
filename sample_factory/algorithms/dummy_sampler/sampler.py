@@ -111,7 +111,7 @@ class DummySampler(AlgorithmBase):
                     global_env_id = proc_idx * self.cfg.num_envs_per_worker + env_idx
                     env_config = AttrDict(worker_index=proc_idx, vector_index=env_idx, env_id=global_env_id)
 
-                    env = make_env_func(cfg=self.cfg, env_config=env_config)
+                    env = make_env_func(cfg=self.cfg, env_id=global_env_id, env_config=env_config)
                     log.debug('CPU affinity after create_env: %r', psutil.Process().cpu_affinity() if platform != 'darwin' else 'MacOS - None')
                     env.seed(global_env_id)
                     envs.append(env)
