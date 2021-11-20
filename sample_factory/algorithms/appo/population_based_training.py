@@ -200,7 +200,12 @@ class PopulationBasedTraining:
                 )
             else:
                 params[key] = self._perturb_param(value, key, default_params[key])
-
+        params['full_config']['environment']['grid_config']['size'] = int(self._perturb_param(params['full_config']['environment']['grid_config']['size'], 'gridsize', default_params['full_config']['environment']['grid_config']['size']))
+        params['full_config']['environment']['grid_config']['num_agents'] = int(
+            self._perturb_param(params['full_config']['environment']['grid_config']['num_agents'], 'num_agents',
+                                default_params['full_config']['environment']['grid_config']['num_agents']))
+        if params['full_config']['environment']['grid_config']['num_agents'] < 1:
+            params['full_config']['environment']['grid_config']['num_agents'] = 1
         return params
 
     def _perturb_cfg(self, original_cfg):
@@ -224,9 +229,18 @@ class PopulationBasedTraining:
 
         return replacement_shaping
 
-    def _force_learner_to_save_model(self, policy_id):
+    def _force_learner_to_save_model(self, policy_id, best=False):
         learner_worker = self.learner_workers[policy_id]
+        if best:
+            pid = learner_worker.policy_id
+            learner_worker.policy_id = -1
         learner_worker.save_model()
+        if best:
+            learner_worker.policy_id = pid
+
+    def save_best(self, policy_id):
+        learner_worker = self.learner_workers[policy_id]
+        learner_worker.save_best_model()
 
     def _learner_load_model(self, policy_id, replacement_policy):
         log.debug('Asking learner %d to load model from %d', policy_id, replacement_policy)
@@ -296,6 +310,8 @@ class PopulationBasedTraining:
         worst_policies = policies_sorted[-replace_number:]
 
         if policy_id in best_policies:
+            if policy_id == policies_sorted[-1]:
+                self._force_learner_to_save_model(policy_id, True)
             # don't touch the policies that are doing well
             return
 
@@ -329,6 +345,17 @@ class PopulationBasedTraining:
         else:
             self.policy_cfg[policy_id] = self._perturb_cfg(self.policy_cfg[replacement_policy])
             self.policy_reward_shaping[policy_id] = self._perturb_reward(self.policy_reward_shaping[replacement_policy])
+        for i,runner in enumerate(learner_worker[policy_id].env_runners):
+            learner_worker[policy_id].env_runners[i].close()
+
+        learner_worker[policy_id].env_runners = []
+        for split_idx in range(learner_worker[policy_id].num_splits):
+            env_runner = VectorEnvRunner(
+                learner_worker[policy_id].cfg, learner_worker[policy_id].vector_size // learner_worker[policy_id].num_splits, learner_worker[policy_id].worker_idx, split_idx, learner_worker[policy_id].num_agents,
+                learner_worker[policy_id].shared_buffers, learner_worker[policy_id].reward_shaping,
+            )
+            env_runner.init(start=False)
+            learner_worker[policy_id].env_runners.append(env_runner)
 
         if replacement_policy != policy_id:
             # force replacement policy learner to save the model and wait until it's done
@@ -366,3 +393,366 @@ class PopulationBasedTraining:
                 if policy_id in env_steps:
                     self._write_pbt_summaries(policy_id, env_steps[policy_id])
                     self.last_pbt_summaries = now
+
+#-------------------------------------------------------------------------------------------------------------------------
+
+
+
+class VectorEnvRunner:
+    """
+    A collection of environments simulated sequentially.
+    With double buffering each actor worker holds two vector runners and switches between them.
+    Without single buffering we only use a single VectorEnvRunner per actor worker.
+
+    All envs on a single VectorEnvRunner run in unison, e.g. they all do one step at a time together.
+    This also means they all finish their rollouts together. This allows us to minimize the amount of messages
+    passed around.
+
+    Individual envs (or agents in these envs in case of multi-agent) can potentially be controlled by different
+    policies when we're doing PBT. We only start simulating the next step in the environment when
+    all actions from all envs and all policies are collected. This leaves optimization potential: we can start
+    simulating some envs right away as actions for them arrive. But usually double-buffered sampling masks
+    this type of inefficiency anyway. The worker is probably still rendering a previous vector of envs when
+    the actions arrive.
+    """
+
+    def __init__(self, cfg, num_envs, worker_idx, split_idx, num_agents, shared_buffers, pbt_reward_shaping):
+        """
+        Ctor.
+
+        :param cfg: global system config (all CLI params)
+        :param num_envs: number of envs to run in this vector runner
+        :param worker_idx: idx of the parent worker
+        :param split_idx: index of the environment group in double-buffered sampling (either 0 or 1). Always 0 when
+        double-buffered sampling is disabled.
+        :param num_agents: number of agents in each env (1 for single-agent envs)
+        :param shared_buffers: a collection of all shared data structures used by the algorithm. Most importantly,
+        the trajectory buffers in shared memory.
+        :param pbt_reward_shaping: initial reward shaping dictionary, for configuration where PBT optimizes
+        reward coefficients in environments.
+        """
+
+        self.cfg = cfg
+
+        self.num_envs = num_envs
+        self.worker_idx = worker_idx
+        self.split_idx = split_idx
+
+        self.rollout_step = 0
+
+        self.num_agents = num_agents  # queried from env
+
+        self.shared_buffers = shared_buffers
+        self.policy_output_tensors = self.shared_buffers.policy_output_tensors[self.worker_idx, self.split_idx]
+
+        self.envs, self.actor_states, self.episode_rewards = [], [], []
+
+        self.pbt_reward_shaping = pbt_reward_shaping
+
+        self.policy_mgr = PolicyManager(self.cfg, self.num_agents)
+
+    def init(self, start = True):
+        """
+        Actually instantiate the env instances.
+        Also creates ActorState objects that hold the state of individual actors in (potentially) multi-agent envs.
+        """
+
+        for env_i in range(self.num_envs):
+            vector_idx = self.split_idx * self.num_envs + env_i
+
+            # global env id within the entire system
+            env_id = self.worker_idx * self.cfg.num_envs_per_worker + vector_idx
+
+            env_config = AttrDict(
+                worker_index=self.worker_idx, vector_index=vector_idx, env_id=env_id,
+            )
+
+            log.info('Creating env %r... %d-%d-%d', env_config, self.worker_idx, self.split_idx, env_i)
+            env = make_env_func(self.cfg, env_id, env_config=env_config, start=start)
+            log.info(str(self.cfg))
+            print(self.cfg)
+            with open('/home/pe/Downloads/pogema-appo-main/cfg.txt', 'w') as fout:
+                fout.write(str(self.cfg))
+            env.seed(env_id)
+            self.envs.append(env)
+
+            actor_states_env, episode_rewards_env = [], []
+            for agent_idx in range(self.num_agents):
+                actor_state = ActorState(
+                    self.cfg, env, self.worker_idx, self.split_idx, env_i, agent_idx,
+                    self.shared_buffers, self.policy_output_tensors[env_i, agent_idx],
+                    self.pbt_reward_shaping, self.policy_mgr,
+                )
+                actor_states_env.append(actor_state)
+                episode_rewards_env.append(0.0)
+
+            self.actor_states.append(actor_states_env)
+            self.episode_rewards.append(episode_rewards_env)
+
+    def update_env_steps(self, env_steps):
+        for env_i in range(self.num_envs):
+            for agent_i in range(self.num_agents):
+                self.actor_states[env_i][agent_i].approx_env_steps = env_steps
+
+    def _process_policy_outputs(self, policy_id, timing):
+        """
+        Process the latest data from the policy worker (for policy = policy_id).
+        Policy outputs currently include new RNN states, actions, values, logprobs, etc. See shared_buffers.py
+        for the full list of outputs.
+
+        As a performance optimization, all these tensors are squished together into a single tensor.
+        This allows us to copy them to shared memory only once, which makes a difference on the policy worker.
+        Here we do np.split to separate them back into individual tensors.
+
+        :param policy_id: index of the policy whose outputs we're currently processing
+        :return: whether we got all outputs for all the actors in our VectorEnvRunner. If this is True then we're
+        ready for the next step of the simulation.
+        """
+
+        all_actors_ready = True
+
+        for env_i in range(self.num_envs):
+            for agent_i in range(self.num_agents):
+                actor_state = self.actor_states[env_i][agent_i]
+                if not actor_state.is_active:
+                    continue
+
+                actor_policy = actor_state.curr_policy_id
+                assert actor_policy != -1
+
+                if actor_policy == policy_id:
+                    # via shared memory mechanism the new data should already be copied into the shared tensors
+
+                    with timing.add_time('split_output_tensors'):
+                        policy_outputs = np.split(
+                            actor_state.policy_output_tensors,
+                            indices_or_sections=actor_state.policy_output_indices,
+                            axis=0,
+                        )
+                    policy_outputs_dict = dict()
+                    new_rnn_state = None
+                    for tensor_idx, name in enumerate(actor_state.policy_output_names):
+                        if name == 'rnn_states':
+                            new_rnn_state = policy_outputs[tensor_idx]
+                        else:
+                            policy_outputs_dict[name] = policy_outputs[tensor_idx]
+
+                    # save parsed trajectory outputs directly into the trajectory buffer
+                    actor_state.set_trajectory_data(policy_outputs_dict, self.rollout_step)
+                    actor_state.last_actions = policy_outputs_dict['actions']
+
+                    # this is an rnn state for the next iteration in the rollout
+                    actor_state.last_rnn_state = new_rnn_state
+
+                    actor_state.ready = True
+                elif not actor_state.ready:
+                    all_actors_ready = False
+
+        # Potential optimization: when actions are ready for all actors within one environment we can execute
+        # a simulation step right away, without waiting for all other actions to be calculated.
+        return all_actors_ready
+
+    def _process_rewards(self, rewards, env_i):
+        """
+        Pretty self-explanatory, here we record the episode reward and apply the optional clipping and
+        scaling of rewards.
+        """
+
+        for agent_i, r in enumerate(rewards):
+            self.actor_states[env_i][agent_i].last_episode_reward += r
+
+        rewards = np.asarray(rewards, dtype=np.float32)
+        rewards = rewards * self.cfg.reward_scale
+        rewards = np.clip(rewards, -self.cfg.reward_clip, self.cfg.reward_clip)
+        return rewards
+
+    def _process_env_step(self, new_obs, rewards, dones, infos, env_i):
+        """
+        Process step outputs from a single environment in the vector.
+
+        :param new_obs: latest observations from the env
+        :param env_i: index of the environment in the vector
+        :return: episodic stats, not empty only on the episode boundary
+        """
+
+        episodic_stats = []
+        env_actor_states = self.actor_states[env_i]
+
+        rewards = self._process_rewards(rewards, env_i)
+
+        for agent_i in range(self.num_agents):
+            actor_state = env_actor_states[agent_i]
+
+            episode_report = actor_state.record_env_step(
+                rewards[agent_i], dones[agent_i], infos[agent_i], self.rollout_step,
+            )
+
+            actor_state.last_obs = new_obs[agent_i]
+            actor_state.update_rnn_state(dones[agent_i])
+
+            if episode_report:
+                episodic_stats.append(episode_report)
+
+        return episodic_stats
+
+    def _finalize_trajectories(self):
+        """
+        Do some postprocessing when we're done with the rollout.
+        """
+
+        rollouts = []
+        for env_i in range(self.num_envs):
+            for agent_i in range(self.num_agents):
+                rollouts.extend(self.actor_states[env_i][agent_i].finalize_trajectory(self.rollout_step))
+
+        return rollouts
+
+    def _update_trajectory_buffers(self, timing):
+        """
+        Request free trajectory buffers to store the next rollout.
+        """
+        num_buffers_to_request = 0
+        for env_i in range(self.num_envs):
+            for agent_i in range(self.num_agents):
+                num_buffers_to_request += self.actor_states[env_i][agent_i].needs_buffer
+
+        if num_buffers_to_request > 0:
+            traj_buffer_indices = self.shared_buffers.get_trajectory_buffers(num_buffers_to_request, timing)
+
+            i = 0
+            for env_i in range(self.num_envs):
+                for agent_i in range(self.num_agents):
+                    actor_state = self.actor_states[env_i][agent_i]
+                    if actor_state.needs_buffer:
+                        buffer_idx = traj_buffer_indices[i]
+                        actor_state.update_traj_buffer(buffer_idx)
+                        i += 1
+
+    def _format_policy_request(self):
+        """
+        Format data that allows us to request new actions from policies that control the agents in all the envs.
+        Note how the data required is basically just indices of envs and agents, as well as location of the step
+        data in the shared rollout buffer. This is enough for the policy worker to find the step data in the shared
+        data structure.
+
+        :return: formatted request to be distributed to policy workers through FIFO queues.
+        """
+
+        policy_request = dict()
+
+        for env_i in range(self.num_envs):
+            for agent_i in range(self.num_agents):
+                actor_state = self.actor_states[env_i][agent_i]
+
+                if actor_state.is_active:
+                    policy_id = actor_state.curr_policy_id
+
+                    # where policy worker should look for the policy inputs for the next step
+                    data = (env_i, agent_i, actor_state.curr_traj_buffer_idx, self.rollout_step)
+
+                    if policy_id not in policy_request:
+                        policy_request[policy_id] = []
+                    policy_request[policy_id].append(data)
+
+        return policy_request
+
+    def _prepare_next_step(self):
+        """
+        Write environment outputs to shared memory so policy workers can calculate actions for the next step.
+        Note how we temporarily hold obs and rnn_states in local variables before writing them into shared memory.
+        We could not do the memory write right away because for that we need the memory location of the NEXT step.
+        If this is the first step in the new rollout, we need to switch to a new trajectory buffer before we do that
+        (because the previous trajectory buffer is now used by the learner and we can't use it until the learner is
+        done).
+        """
+
+        for env_i in range(self.num_envs):
+            for agent_i in range(self.num_agents):
+                actor_state = self.actor_states[env_i][agent_i]
+
+                if actor_state.is_active:
+                    actor_state.ready = False
+
+                    # populate policy inputs in shared memory
+                    policy_inputs = dict(obs=actor_state.last_obs, rnn_states=actor_state.last_rnn_state)
+                    actor_state.set_trajectory_data(policy_inputs, self.rollout_step)
+                else:
+                    actor_state.ready = True
+
+    def reset(self, report_queue):
+        """
+        Do the very first reset for all environments in a vector. Populate shared memory with initial obs.
+        Note that this is called only once, at the very beginning of training. After this the envs should auto-reset.
+
+        :param report_queue: we use report queue to monitor reset progress (see appo.py). This can be a lengthy
+        process.
+        :return: first requests for policy workers (to generate actions for the very first env step)
+        """
+
+        for env_i, e in enumerate(self.envs):
+            observations = e.reset()
+
+            if self.cfg.decorrelate_envs_on_one_worker:
+                env_i_split = self.num_envs * self.split_idx + env_i
+                decorrelate_steps = self.cfg.rollout * env_i_split + self.cfg.rollout * random.randint(0, 4)
+
+                log.info('Decorrelating experience for %d frames...', decorrelate_steps)
+                for decorrelate_step in range(decorrelate_steps):
+                    actions = [e.action_space.sample() for _ in range(self.num_agents)]
+                    observations, rew, dones, info = e.step(actions)
+
+            for agent_i, obs in enumerate(observations):
+                actor_state = self.actor_states[env_i][agent_i]
+                actor_state.set_trajectory_data(dict(obs=obs), self.rollout_step)
+                # rnn state is already initialized at zero
+
+            safe_put(report_queue, dict(initialized_env=(self.worker_idx, self.split_idx, env_i)), queue_name='report')
+
+        policy_request = self._format_policy_request()
+        return policy_request
+
+    def advance_rollouts(self, data, timing):
+        """
+        Main function in VectorEnvRunner. Does one step of simulation (if all actions for all actors are available).
+
+        :param data: incoming data from policy workers (policy outputs), including new actions
+        :param timing: this is just for profiling
+        :return: same as reset(), return a set of requests for policy workers, asking them to generate actions for
+        the next env step.
+        """
+
+        with timing.add_time('save_policy_outputs'):
+            policy_id = data['policy_id']
+            all_actors_ready = self._process_policy_outputs(policy_id, timing)
+            if not all_actors_ready:
+                # not all policies involved sent their actions, waiting for more
+                return None, None, None
+
+        complete_rollouts, episodic_stats = [], []
+
+        for env_i, e in enumerate(self.envs):
+            with timing.add_time('env_step'):
+                actions = [s.curr_actions() for s in self.actor_states[env_i]]
+                new_obs, rewards, dones, infos = e.step(actions)
+
+            with timing.add_time('overhead'):
+                stats = self._process_env_step(new_obs, rewards, dones, infos, env_i)
+                episodic_stats.extend(stats)
+
+        self.rollout_step += 1
+        if self.rollout_step == self.cfg.rollout:
+            # finalize and serialize the trajectory if we have a complete rollout
+            complete_rollouts = self._finalize_trajectories()
+            self._update_trajectory_buffers(timing)
+            self.rollout_step = 0
+
+        with timing.add_time('prepare_next_step'):
+            self._prepare_next_step()
+
+        policy_request = self._format_policy_request()
+
+        return policy_request, complete_rollouts, episodic_stats
+
+    def close(self):
+        for e in self.envs:
+            e.close()

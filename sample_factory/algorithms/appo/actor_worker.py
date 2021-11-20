@@ -20,7 +20,6 @@ from sample_factory.utils.timing import Timing
 from sample_factory.utils.utils import log, AttrDict, memory_consumption_mb, join_or_kill, set_process_cpu_affinity, \
     set_attr_if_exists, safe_put, safe_put_many
 
-
 def transform_dict_observations(observations):
     """Transform list of dict observations into a dict of lists."""
     obs_dict = dict()
@@ -338,7 +337,7 @@ class VectorEnvRunner:
 
         self.policy_mgr = PolicyManager(self.cfg, self.num_agents)
 
-    def init(self):
+    def init(self, start = True):
         """
         Actually instantiate the env instances.
         Also creates ActorState objects that hold the state of individual actors in (potentially) multi-agent envs.
@@ -354,9 +353,8 @@ class VectorEnvRunner:
                 worker_index=self.worker_idx, vector_index=vector_idx, env_id=env_id,
             )
 
-            # log.info('Creating env %r... %d-%d-%d', env_config, self.worker_idx, self.split_idx, env_i)
-            env = make_env_func(self.cfg, env_id, env_config=env_config)
-
+            log.info('Creating env %r... %d-%d-%d', env_config, self.worker_idx, self.split_idx, env_i)
+            env = make_env_func(self.cfg, env_id, env_config=env_config, start=start)
             env.seed(env_id)
             self.envs.append(env)
 

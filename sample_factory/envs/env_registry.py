@@ -52,7 +52,7 @@ class EnvRegistry:
         """
 
         assert callable(make_env_func), 'make_env_func should be callable'
-
+        #register_env
         entry = EnvRegistryEntry(env_name_prefix, make_env_func, add_extra_params_func, override_default_params_func)
         self.registry[env_name_prefix] = entry
 

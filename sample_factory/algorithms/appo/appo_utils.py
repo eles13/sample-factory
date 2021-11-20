@@ -34,8 +34,8 @@ class DictObservationsWrapper(Wrapper):
         return [dict(obs=o) for o in obs], rew, done, info
 
 
-def make_env_func(cfg, env_id, env_config):
-    env = create_env(cfg.env, env_id, cfg=cfg, env_config=env_config)
+def make_env_func(cfg, env_id, env_config, start):
+    env = create_env(cfg.env, env_id, cfg=cfg, env_config=env_config, start=start)
     if not is_multiagent_env(env):
         env = MultiAgentWrapper(env)
     if not isinstance(env.observation_space, spaces.Dict):

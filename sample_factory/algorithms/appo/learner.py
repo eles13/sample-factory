@@ -1311,6 +1311,34 @@ class LearnerWorker:
             log.warning('Model saving request timed out!')
         self.model_saved_event.clear()
 
+    def save_best_model(self):
+        checkpoint = self._get_checkpoint_dict()
+        assert checkpoint is not None
+
+        checkpoint_dir = self.checkpoint_dir(self.cfg, self.policy_id)
+        tmp_filepath = join(checkpoint_dir, '.best_checkpoint')
+        checkpoint_name = f'best_checkpoint_{self.train_step:09d}_{self.env_steps}.pth'
+        filepath = join(checkpoint_dir, checkpoint_name)
+        log.info('Saving %s...', tmp_filepath)
+        torch.save(checkpoint, tmp_filepath)
+        log.info('Renaming %s to %s', tmp_filepath, filepath)
+        os.rename(tmp_filepath, filepath)
+
+        while len(self.get_checkpoints(checkpoint_dir)) > self.cfg.keep_checkpoints:
+            oldest_checkpoint = self.get_checkpoints(checkpoint_dir)[0]
+            if os.path.isfile(oldest_checkpoint):
+                log.debug('Removing %s', oldest_checkpoint)
+                os.remove(oldest_checkpoint)
+
+        if self.cfg.save_milestones_sec > 0:
+            # milestones enabled
+            if time.time() - self.last_milestone_time >= self.cfg.save_milestones_sec:
+                milestones_dir = ensure_dir_exists(join(checkpoint_dir, 'milestones'))
+                milestone_path = join(milestones_dir, f'{checkpoint_name}.milestone')
+                log.debug('Saving a milestone %s', milestone_path)
+                shutil.copy(filepath, milestone_path)
+                self.last_milestone_time = time.time()
+
     def close(self):
         self.task_queue.put((TaskType.TERMINATE, None))
         self.shared_buffers._stop_experience_collection[self.policy_id] = False
