@@ -187,7 +187,7 @@ class PopulationBasedTraining:
         log.debug('Param %s changed from %.6f to %.6f', param_name, param, new_value)
         return new_value
 
-    def _perturb(self, old_params, default_params):
+    def _perturb(self, old_params, default_params, has_inference=False):
         """Params assumed to be a flat dict."""
         params = copy.deepcopy(old_params)
 
@@ -200,17 +200,18 @@ class PopulationBasedTraining:
                 )
             else:
                 params[key] = self._perturb_param(value, key, default_params[key])
-        params['full_config']['environment']['grid_config']['size'] = int(self._perturb_param(params['full_config']['environment']['grid_config']['size'], 'gridsize', default_params['full_config']['environment']['grid_config']['size']))
-        params['full_config']['environment']['grid_config']['num_agents'] = int(
-            self._perturb_param(params['full_config']['environment']['grid_config']['num_agents'], 'num_agents',
-                                default_params['full_config']['environment']['grid_config']['num_agents']))
-        if params['full_config']['environment']['grid_config']['num_agents'] < 1:
-            params['full_config']['environment']['grid_config']['num_agents'] = 1
+        if not has_inference:
+            params['full_config']['environment']['grid_config']['size'] = int(self._perturb_param(params['full_config']['environment']['grid_config']['size'], 'gridsize', default_params['full_config']['environment']['grid_config']['size']))
+            params['full_config']['environment']['grid_config']['num_agents'] = int(
+                self._perturb_param(params['full_config']['environment']['grid_config']['num_agents'], 'num_agents',
+                                    default_params['full_config']['environment']['grid_config']['num_agents']))
+            if params['full_config']['environment']['grid_config']['num_agents'] < 1:
+                params['full_config']['environment']['grid_config']['num_agents'] = 1
         return params
 
-    def _perturb_cfg(self, original_cfg):
+    def _perturb_cfg(self, original_cfg, has_inference=False):
         replacement_cfg = copy.deepcopy(original_cfg)
-        return self._perturb(replacement_cfg, default_params=self.cfg)
+        return self._perturb(replacement_cfg, default_params=self.cfg, has_inference=has_inference)
 
     def _perturb_reward(self, original_reward_shaping):
         if original_reward_shaping is None:
@@ -336,26 +337,28 @@ class PopulationBasedTraining:
                 )
             else:
                 log.debug('Difference in reward is not enough %.3f %.3f', abs(reward_delta), reward_delta_relative)
-
+        has_inference = np.any([runner.worker_idx + runner.split_idx == 0 for runner in learner_worker[policy_id].env_runners])
         if policy_id == 0:
             # Do not ever mutate the 1st policy, leave it for the reference
             # Still we allow replacements in case it's really bad
             self.policy_cfg[policy_id] = self.policy_cfg[replacement_policy]
             self.policy_reward_shaping[policy_id] = self.policy_reward_shaping[replacement_policy]
         else:
-            self.policy_cfg[policy_id] = self._perturb_cfg(self.policy_cfg[replacement_policy])
+            self.policy_cfg[policy_id] = self._perturb_cfg(self.policy_cfg[replacement_policy], has_inference)
             self.policy_reward_shaping[policy_id] = self._perturb_reward(self.policy_reward_shaping[replacement_policy])
-        for i,runner in enumerate(learner_worker[policy_id].env_runners):
-            learner_worker[policy_id].env_runners[i].close()
 
-        learner_worker[policy_id].env_runners = []
-        for split_idx in range(learner_worker[policy_id].num_splits):
+        skipfirst = 0 if not has_inference else 1
+        for i,runner in enumerate(learner_worker[policy_id].env_runners):
+            if runner.worker_idx + runner.split_idx != 0:
+                learner_worker[policy_id].env_runners[i].close()
+
+        for split_idx in range(skipfirst,learner_worker[policy_id].num_splits):
             env_runner = VectorEnvRunner(
                 learner_worker[policy_id].cfg, learner_worker[policy_id].vector_size // learner_worker[policy_id].num_splits, learner_worker[policy_id].worker_idx, split_idx, learner_worker[policy_id].num_agents,
                 learner_worker[policy_id].shared_buffers, learner_worker[policy_id].reward_shaping,
             )
             env_runner.init(start=False)
-            learner_worker[policy_id].env_runners.append(env_runner)
+            learner_worker[policy_id].env_runners[split_idx] = env_runner
 
         if replacement_policy != policy_id:
             # force replacement policy learner to save the model and wait until it's done
