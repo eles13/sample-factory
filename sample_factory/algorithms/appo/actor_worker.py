@@ -459,12 +459,9 @@ class VectorEnvRunner:
 
         episodic_stats = []
         env_actor_states = self.actor_states[env_i]
-
         rewards = self._process_rewards(rewards, env_i)
-
-        for agent_i in range(self.num_agents):
+        for agent_i in range(self.cfg.full_config['environment']['grid_config']['size']):
             actor_state = env_actor_states[agent_i]
-
             episode_report = actor_state.record_env_step(
                 rewards[agent_i], dones[agent_i], infos[agent_i], self.rollout_step,
             )
@@ -549,7 +546,7 @@ class VectorEnvRunner:
         """
 
         for env_i in range(self.num_envs):
-            for agent_i in range(self.num_agents):
+            for agent_i in range(self.cfg.full_config['environment']['grid_config']['size']):
                 actor_state = self.actor_states[env_i][agent_i]
 
                 if actor_state.is_active:
@@ -616,7 +613,10 @@ class VectorEnvRunner:
             with timing.add_time('env_step'):
                 actions = [s.curr_actions() for s in self.actor_states[env_i]]
                 new_obs, rewards, dones, infos = e.step(actions)
-
+            if len(rewards) < len(actions):
+                rewards = rewards + [0] * (len(actions) - len(rewards))
+                dones = dones + [0] * (len(actions) - len(dones))
+                infos = [infos[0]] * len(actions)
             with timing.add_time('overhead'):
                 stats = self._process_env_step(new_obs, rewards, dones, infos, env_i)
                 episodic_stats.extend(stats)

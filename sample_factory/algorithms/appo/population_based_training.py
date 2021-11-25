@@ -200,13 +200,15 @@ class PopulationBasedTraining:
                 )
             else:
                 params[key] = self._perturb_param(value, key, default_params[key])
-        if not has_inference:
+        if not has_inference and 'full_config' in params:
             params['full_config']['environment']['grid_config']['size'] = int(self._perturb_param(params['full_config']['environment']['grid_config']['size'], 'gridsize', default_params['full_config']['environment']['grid_config']['size']))
             params['full_config']['environment']['grid_config']['num_agents'] = int(
                 self._perturb_param(params['full_config']['environment']['grid_config']['num_agents'], 'num_agents',
                                     default_params['full_config']['environment']['grid_config']['num_agents']))
-            if params['full_config']['environment']['grid_config']['num_agents'] < 1:
-                params['full_config']['environment']['grid_config']['num_agents'] = 1
+            if params['full_config']['environment']['grid_config']['num_agents'] < 4:
+                params['full_config']['environment']['grid_config']['num_agents'] = 4
+            if params['full_config']['environment']['grid_config']['size'] < params['full_config']['environment']['grid_config']['num_agents'] :
+                params['full_config']['environment']['grid_config']['size'] = params['full_config']['environment']['grid_config']['num_agents']
         return params
 
     def _perturb_cfg(self, original_cfg, has_inference=False):
