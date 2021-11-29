@@ -201,14 +201,24 @@ class PopulationBasedTraining:
             else:
                 params[key] = self._perturb_param(value, key, default_params[key])
         if not has_inference and 'full_config' in params:
-            params['full_config']['environment']['grid_config']['size'] = int(self._perturb_param(params['full_config']['environment']['grid_config']['size'], 'gridsize', default_params['full_config']['environment']['grid_config']['size']))
-            params['full_config']['environment']['grid_config']['num_agents'] = int(
-                self._perturb_param(params['full_config']['environment']['grid_config']['num_agents'], 'num_agents',
-                                    default_params['full_config']['environment']['grid_config']['num_agents']))
-            if params['full_config']['environment']['grid_config']['num_agents'] < 4:
-                params['full_config']['environment']['grid_config']['num_agents'] = 4
-            if params['full_config']['environment']['grid_config']['size'] < params['full_config']['environment']['grid_config']['num_agents'] :
-                params['full_config']['environment']['grid_config']['size'] = params['full_config']['environment']['grid_config']['num_agents']
+            change_to = int(self._perturb_param(params['full_config']['environment']['grid_config']['size'], 'gridsize', default_params['full_config']['environment']['grid_config']['size']))
+            log.info(f"Changing env size from {params['full_config']['environment']['grid_config']['size']} to {change_to}")
+            try:
+                with open('./changelog.log') as fin:
+                    lines = fin.readlines()
+            except:
+                lines = []
+            with open('./changelog.log', 'w') as fout:
+                fout.write('\n'.join(lines + [f"Changing env size from {params['full_config']['environment']['grid_config']['size']} to {change_to}"]))
+            params['full_config']['environment']['grid_config']['size'] = change_to
+            params['full_config']['environment']['grid_config']['density'] = np.random.randint(1, 8) / 10
+            if random.random() > self.cfg.pbt_mutation_rate:
+                params['full_config']['environment']['grid_config']['num_agents'] = perturb_float(
+                    params['full_config']['environment']['grid_config']['num_agents'], 1.5)
+            if params['full_config']['environment']['grid_config']['size'] < 4 :
+                params['full_config']['environment']['grid_config']['size'] = 4
+            if params['full_config']['environment']['grid_config']['num_agents'] > (params['full_config']['environment']['grid_config']['size']**2 * (1-params['full_config']['environment']['grid_config']['density'])) // 2:
+                params['full_config']['environment']['grid_config']['num_agents'] = (params['full_config']['environment']['grid_config']['size']**2 * (1-params['full_config']['environment']['grid_config']['density'])) // 2
         return params
 
     def _perturb_cfg(self, original_cfg, has_inference=False):
