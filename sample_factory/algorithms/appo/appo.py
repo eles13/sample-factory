@@ -661,7 +661,6 @@ class APPO(ReinforcementLearningAlgorithm):
         self.finish_initialization()
 
         log.info('Collecting experience...')
-
         timing = Timing()
         with timing.timeit('experience'):
             # noinspection PyBroadException
@@ -682,7 +681,6 @@ class APPO(ReinforcementLearningAlgorithm):
                         self.last_report = now
 
                         self.update_env_steps_actor()
-
                     self.pbt.update(self.env_steps, self.policy_avg_stats)
 
             except Exception:

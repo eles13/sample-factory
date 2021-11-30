@@ -204,11 +204,11 @@ class PopulationBasedTraining:
             change_to = int(self._perturb_param(params['full_config']['environment']['grid_config']['size'], 'gridsize', default_params['full_config']['environment']['grid_config']['size']))
             log.info(f"Changing env size from {params['full_config']['environment']['grid_config']['size']} to {change_to}")
             try:
-                with open('./changelog.log') as fin:
+                with open('/home/pe/Downloads/pogema-appo-main/changelog.log') as fin:
                     lines = fin.readlines()
             except:
                 lines = []
-            with open('./changelog.log', 'w') as fout:
+            with open('/home/pe/Downloads/pogema-appo-main/changelog.log', 'w') as fout:
                 fout.write('\n'.join(lines + [f"Changing env size from {params['full_config']['environment']['grid_config']['size']} to {change_to}"]))
             params['full_config']['environment']['grid_config']['size'] = change_to
             params['full_config']['environment']['grid_config']['density'] = np.random.randint(1, 8) / 10
@@ -300,9 +300,10 @@ class PopulationBasedTraining:
             self._write_dict_summaries(self.policy_reward_shaping[policy_id], writer, 'rew', env_steps)
 
     def _update_policy(self, policy_id, policy_stats):
+        log.info('###########################update policy#################################')
         if self.cfg.pbt_target_objective not in policy_stats:
             return
-
+        log.info('$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$')
         target_objectives = policy_stats[self.cfg.pbt_target_objective]
 
         # not enough data to perform PBT yet
@@ -349,7 +350,7 @@ class PopulationBasedTraining:
                 )
             else:
                 log.debug('Difference in reward is not enough %.3f %.3f', abs(reward_delta), reward_delta_relative)
-        has_inference = np.any([runner.worker_idx + runner.split_idx == 0 for runner in learner_worker[policy_id].env_runners])
+        has_inference = np.any([runner.worker_idx + runner.split_idx == 0 for runner in self.learner_workers[policy_id].env_runners])
         if policy_id == 0:
             # Do not ever mutate the 1st policy, leave it for the reference
             # Still we allow replacements in case it's really bad
@@ -360,17 +361,17 @@ class PopulationBasedTraining:
             self.policy_reward_shaping[policy_id] = self._perturb_reward(self.policy_reward_shaping[replacement_policy])
 
         skipfirst = 0 if not has_inference else 1
-        for i,runner in enumerate(learner_worker[policy_id].env_runners):
+        for i,runner in enumerate(self.learner_workers[policy_id].env_runners):
             if runner.worker_idx + runner.split_idx != 0:
-                learner_worker[policy_id].env_runners[i].close()
+                self.learner_workers[policy_id].env_runners[i].close()
 
-        for split_idx in range(skipfirst,learner_worker[policy_id].num_splits):
+        for split_idx in range(skipfirst,self.learner_workers[policy_id].num_splits):
             env_runner = VectorEnvRunner(
-                learner_worker[policy_id].cfg, learner_worker[policy_id].vector_size // learner_worker[policy_id].num_splits, learner_worker[policy_id].worker_idx, split_idx, learner_worker[policy_id].num_agents,
-                learner_worker[policy_id].shared_buffers, learner_worker[policy_id].reward_shaping,
+                self.learner_workers[policy_id].cfg, self.learner_workers[policy_id].vector_size // self.learner_workers[policy_id].num_splits, self.learner_workers[policy_id].worker_idx, split_idx, self.learner_workers[policy_id].num_agents,
+                self.learner_workers[policy_id].shared_buffers, self.learner_workers[policy_id].reward_shaping,
             )
             env_runner.init(start=False)
-            learner_worker[policy_id].env_runners[split_idx] = env_runner
+            self.learner_workers[policy_id].env_runners[split_idx] = env_runner
 
         if replacement_policy != policy_id:
             # force replacement policy learner to save the model and wait until it's done
@@ -387,7 +388,7 @@ class PopulationBasedTraining:
     def update(self, env_steps, policy_stats):
         if not self.cfg.with_pbt or self.cfg.num_policies <= 1:
             return
-
+        log.info('**************************before loop policy************************')
         for policy_id in range(self.cfg.num_policies):
             if policy_id not in env_steps:
                 continue
@@ -396,7 +397,9 @@ class PopulationBasedTraining:
                 continue
 
             steps_since_last_update = env_steps[policy_id] - self.last_update[policy_id]
+            log.info('$$$$$$$$$$$$$$$$$$$$$$$before if policy$$$$$$$$$$$$$$$$$$$$$$$$$$$$$')
             if steps_since_last_update > self.cfg.pbt_period_env_steps:
+                log.info('!!!!!!!!!!!!!!!!!!!!!!!before update policy!!!!!!!!!!!!!!!!!!!!!!!!')
                 self._update_policy(policy_id, policy_stats)
                 self._write_pbt_summaries(policy_id, env_steps[policy_id])
                 self.last_update[policy_id] = env_steps[policy_id]
